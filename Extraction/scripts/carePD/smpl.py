@@ -7,26 +7,11 @@ from scipy.interpolate import interp1d
 
 import general_motion_retargeting.utils.lafan_vendor.utils as utils
 
-# Beyond the 22 main body joints, SMPL-X also carries a set of landmark
-# points via vertex_joint_selector (toes/heels/nose/eyes...). These aren't
-# on the body_model.parents kinematic chain and have no local rotation of
-# their own, so they borrow the orientation of the bone (foot) they belong to.
-# Indices in JOINT_NAMES: left_big_toe=60, left_small_toe=61, left_heel=62,
-# right_big_toe=63, right_small_toe=64, right_heel=65
-EXTRA_LANDMARK_JOINTS = {
-    "left_heel": (62, "left_foot"),
-    "left_big_toe": (60, "left_foot"),
-    "left_small_toe": (61, "left_foot"),
-    "right_heel": (65, "right_foot"),
-    "right_big_toe": (63, "right_foot"),
-    "right_small_toe": (64, "right_foot"),
-}
-
 
 def load_smplx_file(smplx_file, smplx_body_model_path):
     smplx_data = np.load(smplx_file, allow_pickle=True)
 
-    num_betas = smplx_data["betas"].shape[-1]  # Follow this data's actual betas dimensionality, don't hardcode it
+    num_betas = smplx_data["betas"].shape[-1]  # 跟着这份数据实际的 betas 维度走，不写死
     body_model = smplx.create(
         smplx_body_model_path,
         "smplx",
@@ -49,7 +34,7 @@ def load_smplx_file(smplx_file, smplx_body_model_path):
         jaw_pose=torch.zeros(num_frames, 3).float(),
         leye_pose=torch.zeros(num_frames, 3).float(),
         reye_pose=torch.zeros(num_frames, 3).float(),
-        expression=torch.zeros(num_frames, body_model.num_expression_coeffs).float(),  # Follow the model's actual expression dimensionality
+        expression=torch.zeros(num_frames, body_model.num_expression_coeffs).float(),  # 跟着模型实际表情维度走
         return_full_pose=True,
     )
     if len(smplx_data["betas"].shape)==1:
@@ -189,23 +174,22 @@ def get_smplx_data_offline_fast(smplx_data, body_model, smplx_output, tgt_fps=30
     }
     """
     src_fps = smplx_data["mocap_frame_rate"].item()
+    frame_skip = int(src_fps / tgt_fps)
     num_frames = smplx_data["pose_body"].shape[0]
     global_orient = smplx_output.global_orient.squeeze()
     full_body_pose = smplx_output.full_pose.reshape(num_frames, -1, 3)
     joints = smplx_output.joints.detach().numpy().squeeze()
     joint_names = JOINT_NAMES[: len(body_model.parents)]
     parents = body_model.parents
-
+    
     if tgt_fps < src_fps:
         # perform fps alignment with proper interpolation
-        # (derived from the fps ratio directly -- a floored integer
-        # frame_skip breaks for non-integer ratios like 150 -> 100)
-        new_num_frames = int(round(num_frames * tgt_fps / src_fps))
-
+        new_num_frames = num_frames // frame_skip
+        
         # Create time points for interpolation
         original_time = np.arange(num_frames)
         target_time = np.linspace(0, num_frames-1, new_num_frames)
-
+        
         # Interpolate global orientation using SLERP
         global_orient_interp = []
         for i in range(len(target_time)):
@@ -213,13 +197,13 @@ def get_smplx_data_offline_fast(smplx_data, body_model, smplx_output, tgt_fps=30
             idx1 = int(np.floor(t))
             idx2 = min(idx1 + 1, num_frames - 1)
             alpha = t - idx1
-
+            
             rot1 = R.from_rotvec(global_orient[idx1])
             rot2 = R.from_rotvec(global_orient[idx2])
             interp_rot = slerp(rot1, rot2, alpha)
             global_orient_interp.append(interp_rot.as_rotvec())
         global_orient = np.stack(global_orient_interp, axis=0)
-
+        
         # Interpolate full body pose using SLERP
         full_body_pose_interp = []
         for i in range(full_body_pose.shape[1]):  # For each joint
@@ -229,14 +213,14 @@ def get_smplx_data_offline_fast(smplx_data, body_model, smplx_output, tgt_fps=30
                 idx1 = int(np.floor(t))
                 idx2 = min(idx1 + 1, num_frames - 1)
                 alpha = t - idx1
-
+                
                 rot1 = R.from_rotvec(full_body_pose[idx1, i])
                 rot2 = R.from_rotvec(full_body_pose[idx2, i])
                 interp_rot = slerp(rot1, rot2, alpha)
                 joint_rots.append(interp_rot.as_rotvec())
             full_body_pose_interp.append(np.stack(joint_rots, axis=0))
         full_body_pose = np.stack(full_body_pose_interp, axis=1)
-
+        
         # Interpolate joint positions using linear interpolation
         joints_interp = []
         for i in range(joints.shape[1]):  # For each joint
@@ -244,11 +228,11 @@ def get_smplx_data_offline_fast(smplx_data, body_model, smplx_output, tgt_fps=30
                 interp_func = interp1d(original_time, joints[:, i, j], kind='linear')
                 joints_interp.append(interp_func(target_time))
         joints = np.stack(joints_interp, axis=1).reshape(new_num_frames, -1, 3)
-
+        
         aligned_fps = len(global_orient) / num_frames * src_fps
     else:
         aligned_fps = tgt_fps
-
+        
     smplx_data_frames = []
     for curr_frame in range(len(global_orient)):
         result = {}
@@ -266,18 +250,6 @@ def get_smplx_data_offline_fast(smplx_data, body_model, smplx_output, tgt_fps=30
             joint_orientations.append(rot)
             result[joint_name] = (single_joints[i], rot.as_quat(scalar_first=True))
 
-        for name, (idx, source_joint) in EXTRA_LANDMARK_JOINTS.items():
-            source_rot = joint_orientations[joint_names.index(source_joint)]
-            result[name] = (single_joints[idx], source_rot.as_quat(scalar_first=True))
-
-        # SMPL-X has no sacrum landmark, and no mesh vertex mapping
-        # corresponding to LPSI/RPSI either; the pelvis root joint is used
-        # as a stand-in -- close in height (about 9cm above the left/right
-        # hip midpoint, sitting between the hip-joint line and spine1), but
-        # it's an internal centroid computed by J_regressor, not a
-        # skin-surface point, so it will sit somewhat more anterior than
-        # the true LPSI/RPSI midpoint.
-        result["sacrum"] = result["pelvis"]
 
         smplx_data_frames.append(result)
 
@@ -295,19 +267,18 @@ def get_gvhmr_data_offline_fast(smplx_data, body_model, smplx_output, tgt_fps=30
     }
     """
     src_fps = smplx_data["mocap_frame_rate"].item()
+    frame_skip = int(src_fps / tgt_fps)
     num_frames = smplx_data["pose_body"].shape[0]
     global_orient = smplx_output.global_orient.squeeze()
     full_body_pose = smplx_output.full_pose.reshape(num_frames, -1, 3)
     joints = smplx_output.joints.detach().numpy().squeeze()
     joint_names = JOINT_NAMES[: len(body_model.parents)]
     parents = body_model.parents
-
+    
     if tgt_fps < src_fps:
         # perform fps alignment with proper interpolation
-        # (derived from the fps ratio directly -- a floored integer
-        # frame_skip breaks for non-integer ratios like 150 -> 100)
-        new_num_frames = int(round(num_frames * tgt_fps / src_fps))
-
+        new_num_frames = num_frames // frame_skip
+        
         # Create time points for interpolation
         original_time = np.arange(num_frames)
         target_time = np.linspace(0, num_frames-1, new_num_frames)
