@@ -1,7 +1,7 @@
 import numpy as np
 
 d = np.load(
-    "extracted/mujoco_markers/mujoco_markers_sub05walk1.npz",
+    "/home/mocap/whole_body_tracking/logs/isaaclab_keypoints/isaaclab_markers_fh5jpvqm.npz",
     allow_pickle=True,
 )
 
@@ -19,8 +19,9 @@ print("fps:", fps)
 print("unit:", unit)
 print("source_file:", source_file)
 
-pelvis_idx = list(marker_names).index("LASI")
-pelvis_traj = positions[:, pelvis_idx, :] 
+#pelvis_idx = list(marker_names).index("LASI")
+#pelvis_traj = positions[:, pelvis_idx, :] 
 
-print("LASI trajectory (first 5 frames):", pelvis_traj[:5])
+#print("LASI trajectory (first 5 frames):", pelvis_traj[:5])
+print(list(marker_names))
 
